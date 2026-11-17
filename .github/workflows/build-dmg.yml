@@ -14,7 +14,7 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Rust (aarch64-apple-darwin)
         uses: dtolnay/rust-toolchain@stable
@@ -34,7 +34,7 @@ jobs:
         run: file build/"GPUI Diff Tool".app/Contents/MacOS/gpui-diff-tool
 
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpui-diff-tool-arm64-dmg
           path: build/*.dmg
