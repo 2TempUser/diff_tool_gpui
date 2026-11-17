@@ -8,6 +8,7 @@ edition = "2021"
 # gpui_platform::application()，且需要 monorepo 内部工具链，外部项目直接
 # git 依赖会构建失败。0.2.2 已经过 cargo check 验证可编译。
 gpui = "0.2.2"
+gpui-component = "=0.4.0"
 # 行级 Diff 算法
 similar = "2.6"
 # 原生文件选择对话框

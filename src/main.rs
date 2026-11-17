@@ -2,6 +2,10 @@ use gpui::{
     div, prelude::*, px, rgb, rgba, App, Application, Bounds, Context, Entity,
     ScrollHandle, SharedString, Window, WindowBounds, WindowOptions,
 };
+use gpui_component::{
+    input::{Input, InputState},
+    Root,
+};
 use similar::{ChangeTag, TextDiff};
 use std::fs;
 use std::path::PathBuf;
@@ -21,6 +25,8 @@ struct DiffApp {
     right_path: Option<PathBuf>,
     left_content: String,
     right_content: String,
+    left_path_input: Entity<InputState>,
+    right_path_input: Entity<InputState>,
     rows: Vec<DiffRow>,
     added_count: usize,
     removed_count: usize,
@@ -29,7 +35,7 @@ struct DiffApp {
 }
 
 impl DiffApp {
-    fn new(_cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let left_sample = "fn main() {\n    println!(\"Hello, world!\");\n    let x = 10;\n    let y = 20;\n    println!(\"Sum: {}\", x + y);\n}\n";
         let right_sample = "fn main() {\n    println!(\"Hello, GPUI!\");\n    let x = 10;\n    let z = 30;\n    println!(\"Result: {}\", x + z);\n}\n";
 
@@ -38,6 +44,10 @@ impl DiffApp {
             right_path: None,
             left_content: left_sample.to_string(),
             right_content: right_sample.to_string(),
+            left_path_input: cx
+                .new(|cx| InputState::new(window, cx).placeholder("输入左侧文件路径")),
+            right_path_input: cx
+                .new(|cx| InputState::new(window, cx).placeholder("输入右侧文件路径")),
             rows: Vec::new(),
             added_count: 0,
             removed_count: 0,
@@ -138,28 +148,52 @@ impl DiffApp {
 
             if let Some(file_handle) = file {
                 let path = file_handle.path().to_path_buf();
-                let read_result = fs::read(&path).map_err(|e| e.to_string());
                 let _ = this.update(cx, |app, cx| {
-                    match read_result {
-                        Ok(bytes) => {
-                            let content = String::from_utf8_lossy(&bytes).into_owned();
-                            if is_left {
-                                app.left_path = Some(path);
-                                app.left_content = content;
-                            } else {
-                                app.right_path = Some(path);
-                                app.right_content = content;
-                            }
-                            app.error_message = None;
-                            app.recompute_diff();
-                        }
-                        Err(e) => {
-                            app.error_message = Some(format!("读取失败: {}", e));
-                        }
-                    }
-                    cx.notify();
+                    app.load_file(path, is_left, cx);
                 });
             }
+        })
+        .detach();
+    }
+
+    fn open_typed_path(&mut self, is_left: bool, cx: &mut Context<Self>) {
+        let value = if is_left {
+            self.left_path_input.read(cx).value().to_string()
+        } else {
+            self.right_path_input.read(cx).value().to_string()
+        };
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if value.is_empty() {
+            self.error_message = Some("请输入文件路径".to_string());
+            cx.notify();
+            return;
+        }
+        self.load_file(PathBuf::from(value), is_left, cx);
+    }
+
+    fn load_file(&mut self, path: PathBuf, is_left: bool, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let read_result = fs::read(&path).map_err(|error| error.to_string());
+            let _ = this.update(cx, |app, cx| {
+                match read_result {
+                    Ok(bytes) => {
+                        let content = String::from_utf8_lossy(&bytes).into_owned();
+                        if is_left {
+                            app.left_path = Some(path);
+                            app.left_content = content;
+                        } else {
+                            app.right_path = Some(path);
+                            app.right_content = content;
+                        }
+                        app.error_message = None;
+                        app.recompute_diff();
+                    }
+                    Err(error) => {
+                        app.error_message = Some(format!("读取文件失败: {}", error));
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -352,6 +386,53 @@ impl Render for DiffApp {
                             ),
                     ),
             )
+            // 文件路径输入
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(48.0))
+                    .px_4()
+                    .bg(rgb(0x181825))
+                    .border_b_1()
+                    .border_color(rgb(0x313244))
+                    .child(div().text_xs().text_color(rgb(0xa6adc8)).child("左侧路径"))
+                    .child(Input::new(&self.left_path_input).w(px(360.0)).h(px(32.0)))
+                    .child(
+                        div()
+                            .id("btn-open-left-path")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x313244))
+                            .hover(|s| s.bg(rgb(0x45475a)))
+                            .cursor_pointer()
+                            .text_sm()
+                            .child("打开")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_typed_path(true, cx);
+                            })),
+                    )
+                    .child(div().w(px(24.0)))
+                    .child(div().text_xs().text_color(rgb(0xa6adc8)).child("右侧路径"))
+                    .child(Input::new(&self.right_path_input).w(px(360.0)).h(px(32.0)))
+                    .child(
+                        div()
+                            .id("btn-open-right-path")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x313244))
+                            .hover(|s| s.bg(rgb(0x45475a)))
+                            .cursor_pointer()
+                            .text_sm()
+                            .child("打开")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open_typed_path(false, cx);
+                            })),
+                    ),
+            )
             // 主体 Side-by-Side Diff 滚动区
             .child(
                 div()
@@ -459,15 +540,16 @@ impl Render for DiffApp {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        gpui_component::init(cx);
         let bounds = Bounds::centered(None, gpui::size(px(1200.0), px(760.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| {
-                let view: Entity<DiffApp> = cx.new(|cx| DiffApp::new(cx));
-                view
+            |window, cx| {
+                let view: Entity<DiffApp> = cx.new(|cx| DiffApp::new(window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
             },
         )
         .unwrap();
