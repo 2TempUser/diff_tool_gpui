@@ -1,0 +1,11 @@
+# Rust 构建产物
+/target/
+
+# 本地打包产物
+/build/
+*.dmg
+
+# macOS 系统文件
+.DS_Store
+.AppleDouble
+.LSOverride

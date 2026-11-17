@@ -1,0 +1,39 @@
+name: Build macOS ARM64 DMG
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-dmg:
+    # macos-14 是 Apple Silicon (M1) runner，可原生产出 arm64 二进制
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (aarch64-apple-darwin)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build and package DMG
+        run: bash scripts/build-macos.sh
+
+      - name: Verify architecture
+        run: file build/"GPUI Diff Tool".app/Contents/MacOS/gpui-diff-tool
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpui-diff-tool-arm64-dmg
+          path: build/*.dmg
+          if-no-files-found: error

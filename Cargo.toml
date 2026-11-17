@@ -1,0 +1,20 @@
+[package]
+name = "gpui-diff-tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 锁定 crates.io 稳定版。原配置依赖 zed 的 main 分支，其 API 已迁移到
+# gpui_platform::application()，且需要 monorepo 内部工具链，外部项目直接
+# git 依赖会构建失败。0.2.2 已经过 cargo check 验证可编译。
+gpui = "0.2.2"
+# 行级 Diff 算法
+similar = "2.6"
+# 原生文件选择对话框
+rfd = "0.15"
+# 注意：原配置声明的 smol 是死依赖（代码从未使用，且 gpui 自身已传递依赖 smol），已移除。
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
