@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${PROJECT_DIR}/build"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
+DMG_CONTENTS_DIR="${BUILD_DIR}/dmg-contents"
 DMG_PATH="${BUILD_DIR}/${APP_NAME}-${VERSION}-arm64.dmg"
 
 log() { printf '\033[1;34m[build]\033[0m %s\n' "$*"; }
@@ -72,10 +73,29 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# An ad-hoc signature seals the assembled bundle but does not establish a trusted developer.
+log "为 App Bundle 添加 ad-hoc 签名..."
+codesign --force --sign - "${APP_DIR}"
+codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
+
 # ---------- 4. 打包 DMG ----------
 log "打包 DMG..."
 mkdir -p "${BUILD_DIR}"
 rm -f "${DMG_PATH}"
+rm -rf "${DMG_CONTENTS_DIR}"
+mkdir -p "${DMG_CONTENTS_DIR}"
+cp -R "${APP_DIR}" "${DMG_CONTENTS_DIR}/"
+cat > "${DMG_CONTENTS_DIR}/README.txt" <<'README'
+首次打开提示
+
+此应用使用 ad-hoc 签名，未使用 Developer ID 签名或 Apple 公证。
+首次打开时，请按住 Control 键点按应用图标，选择“打开”，并在确认对话框中再次选择“打开”。
+
+如果 macOS 仍提示应用已损坏，请先将应用拖入“应用程序”，然后在终端运行：
+xattr -dr com.apple.quarantine "/Applications/GPUI Diff Tool.app"
+
+仅对你信任的应用执行以上操作。正式分发需要 Developer ID 签名和 Apple 公证。
+README
 
 if command -v create-dmg >/dev/null 2>&1; then
   create-dmg \
@@ -84,11 +104,11 @@ if command -v create-dmg >/dev/null 2>&1; then
     --icon-size 96 \
     --app-drop-link 480 200 \
     "${DMG_PATH}" \
-    "${APP_DIR}" || err "create-dmg 打包失败"
+    "${DMG_CONTENTS_DIR}" || err "create-dmg 打包失败"
 else
   log "未安装 create-dmg，改用系统自带 hdiutil（无拖拽背景美化）"
   log "如需更漂亮的 DMG：brew install create-dmg"
-  hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_DIR}" -ov -format UDZO "${DMG_PATH}" \
+  hdiutil create -volname "${APP_NAME}" -srcfolder "${DMG_CONTENTS_DIR}" -ov -format UDZO "${DMG_PATH}" \
     || err "hdiutil 打包失败"
 fi
 

@@ -45,9 +45,17 @@ git push origin v0.1.0
 
 或在 Actions 页面手动触发 `Build macOS ARM64 DMG`。工作流使用 `macos-14`（Apple Silicon）runner，构建完成后在 Run 页面下载 `gpui-diff-tool-arm64-dmg` artifact。
 
-## 签名与公证（可选，用于对外分发）
+## macOS 首次启动与正式分发
 
-本地构建未做代码签名。若要让 Gatekeeper 放行，需要在拥有 Apple Developer 账号的环境下对 `.app` 执行 `codesign --deep --force --sign "Developer ID Application: ..."`，再做 `xcrun notarytool` 公证。CI 中可通过 `apple-actions/import-codesign-certs` 等 action 注入证书实现。
+构建脚本会对 `.app` 做 ad-hoc 签名并验证 bundle 完整性，但这不等于 Developer ID 签名，也不包含 Apple 公证。首次从 DMG 打开时，macOS 仍可能提示无法验证开发者；可按住 Control 键点按应用，选择“打开”并确认。
+
+如果 macOS 仍提示应用已损坏，请先将应用拖入“应用程序”，然后在终端运行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/GPUI Diff Tool.app"
+```
+
+仅对你信任的应用执行以上操作。要让下载后的应用无需手动放行即可通过 Gatekeeper，需要 Developer ID Application 证书签名并完成 Apple 公证。
 
 ## 已知限制
 
