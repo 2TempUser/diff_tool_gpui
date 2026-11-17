@@ -27,6 +27,9 @@ struct DiffApp {
     right_content: String,
     left_path_input: Entity<InputState>,
     right_path_input: Entity<InputState>,
+    left_text_input: Entity<InputState>,
+    right_text_input: Entity<InputState>,
+    show_text_inputs: bool,
     rows: Vec<DiffRow>,
     added_count: usize,
     removed_count: usize,
@@ -48,6 +51,19 @@ impl DiffApp {
                 .new(|cx| InputState::new(window, cx).placeholder("输入左侧文件路径")),
             right_path_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder("输入右侧文件路径")),
+            left_text_input: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .multi_line()
+                    .rows(4)
+                    .placeholder("粘贴原始文本")
+            }),
+            right_text_input: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .multi_line()
+                    .rows(4)
+                    .placeholder("粘贴修改后的文本")
+            }),
+            show_text_inputs: false,
             rows: Vec::new(),
             added_count: 0,
             removed_count: 0,
@@ -198,6 +214,40 @@ impl DiffApp {
         .detach();
     }
 
+    fn compare_pasted_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.left_content = self.left_text_input.read(cx).value().to_string();
+        self.right_content = self.right_text_input.read(cx).value().to_string();
+        self.left_path = None;
+        self.right_path = None;
+        self.left_path_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.right_path_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.error_message = None;
+        self.recompute_diff();
+        cx.notify();
+    }
+
+    fn clear_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.left_path = None;
+        self.right_path = None;
+        self.left_content.clear();
+        self.right_content.clear();
+        self.error_message = None;
+
+        self.left_path_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.right_path_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.left_text_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.right_text_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+
+        self.recompute_diff();
+        cx.notify();
+    }
+
     fn reload_files(&mut self, cx: &mut Context<Self>) {
         let mut errors = Vec::new();
         if let Some(path) = &self.left_path {
@@ -236,14 +286,26 @@ impl Render for DiffApp {
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "示例文件 A (点击选择文件)".to_string());
+            .unwrap_or_else(|| {
+                if self.left_content.is_empty() {
+                    "未载入".to_string()
+                } else {
+                    "文本内容".to_string()
+                }
+            });
 
         let right_label = self
             .right_path
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "示例文件 B (点击选择文件)".to_string());
+            .unwrap_or_else(|| {
+                if self.right_content.is_empty() {
+                    "未载入".to_string()
+                } else {
+                    "文本内容".to_string()
+                }
+            });
 
         div()
             .flex()
@@ -277,6 +339,26 @@ impl Render for DiffApp {
                             .gap_2()
                             .child(
                                 div()
+                                    .id("btn-toggle-text-input")
+                                    .px_2()
+                                    .py(px(5.0))
+                                    .rounded_lg()
+                                    .bg(rgb(0xe8e8ed))
+                                    .hover(|s| s.bg(rgb(0xdedee3)))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .child(if self.show_text_inputs {
+                                        "收起文本"
+                                    } else {
+                                        "粘贴文本"
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_text_inputs = !this.show_text_inputs;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
                                     .id("btn-swap")
                                     .px_2()
                                     .py(px(5.0))
@@ -303,6 +385,22 @@ impl Render for DiffApp {
                                     .child("↻ 重新载入")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.reload_files(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("btn-clear")
+                                    .px_2()
+                                    .py(px(5.0))
+                                    .rounded_lg()
+                                    .bg(rgb(0xffe9e7))
+                                    .hover(|s| s.bg(rgb(0xffd9d5)))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .text_color(rgb(0xc9342f))
+                                    .child("清空")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.clear_all(window, cx);
                                     })),
                             )
                     )
@@ -332,6 +430,62 @@ impl Render for DiffApp {
                             ),
                     ),
             )
+            .when(self.show_text_inputs, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .px_5()
+                        .py_3()
+                        .bg(rgb(0xf0f0f2))
+                        .border_b_1()
+                        .border_color(rgb(0xdcdce0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x636366))
+                                        .child("粘贴两侧文本，然后比较"),
+                                )
+                                .child(
+                                    div()
+                                        .id("btn-compare-text")
+                                        .px_3()
+                                        .py(px(6.0))
+                                        .rounded_lg()
+                                        .bg(rgb(0x007aff))
+                                        .hover(|s| s.bg(rgb(0x0066d6)))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(0xffffff))
+                                        .child("比较文本")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.compare_pasted_text(window, cx);
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(Input::new(&self.left_text_input).h(px(112.0))),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(Input::new(&self.right_text_input).h(px(112.0))),
+                                ),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex()

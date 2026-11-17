@@ -1,6 +1,12 @@
 # GPUI Diff Tool
 
-一个基于 [GPUI](https://gpui.rs) 的 macOS 原生 Side-by-Side 文件 Diff 工具。
+一个基于 [GPUI](https://gpui.rs) 的 macOS 原生 Side-by-Side 文件与文本 Diff 工具。
+
+## 使用
+
+- 在左右路径栏输入文件路径，或点“选择”打开文件选择器，再点“打开”载入文件。
+- 点“粘贴文本”展开双栏文本框，粘贴两段内容后点“比较文本”。
+- 点“清空”移除两侧文件、路径、文本和差异结果。
 
 ## 修复内容（相对原始 zip）
 
