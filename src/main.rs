@@ -1,6 +1,6 @@
 use gpui::{
-    div, prelude::*, px, rgb, rgba, App, Application, Bounds, Context, Entity,
-    ScrollHandle, SharedString, Window, WindowBounds, WindowOptions,
+    div, hsla, prelude::*, px, rgb, rgba, App, Application, Bounds, Context, Entity,
+    HighlightStyle, ScrollHandle, SharedString, StyledText, Window, WindowBounds, WindowOptions,
 };
 use gpui_component::{
     input::{Input, InputState},
@@ -8,28 +8,40 @@ use gpui_component::{
 };
 use similar::{ChangeTag, TextDiff};
 use std::fs;
+use std::ops::Range;
 use std::path::PathBuf;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ComparisonMode {
+    Text,
+    File,
+}
 
 #[derive(Clone)]
 struct DiffRow {
     left_line_no: Option<usize>,
     left_text: SharedString,
     left_tag: Option<ChangeTag>,
+    left_inline_changes: Vec<Range<usize>>,
     right_line_no: Option<usize>,
     right_text: SharedString,
     right_tag: Option<ChangeTag>,
+    right_inline_changes: Vec<Range<usize>>,
 }
 
 struct DiffApp {
+    mode: ComparisonMode,
+    text_editing: bool,
     left_path: Option<PathBuf>,
     right_path: Option<PathBuf>,
+    file_left_content: String,
+    file_right_content: String,
     left_content: String,
     right_content: String,
     left_path_input: Entity<InputState>,
     right_path_input: Entity<InputState>,
     left_text_input: Entity<InputState>,
     right_text_input: Entity<InputState>,
-    show_text_inputs: bool,
     rows: Vec<DiffRow>,
     added_count: usize,
     removed_count: usize,
@@ -39,14 +51,15 @@ struct DiffApp {
 
 impl DiffApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let left_sample = "fn main() {\n    println!(\"Hello, world!\");\n    let x = 10;\n    let y = 20;\n    println!(\"Sum: {}\", x + y);\n}\n";
-        let right_sample = "fn main() {\n    println!(\"Hello, GPUI!\");\n    let x = 10;\n    let z = 30;\n    println!(\"Result: {}\", x + z);\n}\n";
-
         let mut app = Self {
+            mode: ComparisonMode::Text,
+            text_editing: true,
             left_path: None,
             right_path: None,
-            left_content: left_sample.to_string(),
-            right_content: right_sample.to_string(),
+            file_left_content: String::new(),
+            file_right_content: String::new(),
+            left_content: String::new(),
+            right_content: String::new(),
             left_path_input: cx
                 .new(|cx| InputState::new(window, cx).placeholder("输入左侧文件路径")),
             right_path_input: cx
@@ -63,7 +76,6 @@ impl DiffApp {
                     .rows(4)
                     .placeholder("粘贴修改后的文本")
             }),
-            show_text_inputs: false,
             rows: Vec::new(),
             added_count: 0,
             removed_count: 0,
@@ -72,6 +84,61 @@ impl DiffApp {
         };
         app.recompute_diff();
         app
+    }
+
+    fn inline_change_ranges(left: &str, right: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+        let diff = TextDiff::from_chars(left, right);
+        let mut left_ranges = Vec::new();
+        let mut right_ranges = Vec::new();
+        let (mut left_offset, mut right_offset) = (0, 0);
+
+        for change in diff.iter_all_changes() {
+            let len = change.value().len();
+            match change.tag() {
+                ChangeTag::Equal => {
+                    left_offset += len;
+                    right_offset += len;
+                }
+                ChangeTag::Delete => {
+                    Self::push_inline_range(&mut left_ranges, left_offset..left_offset + len);
+                    left_offset += len;
+                }
+                ChangeTag::Insert => {
+                    Self::push_inline_range(&mut right_ranges, right_offset..right_offset + len);
+                    right_offset += len;
+                }
+            }
+        }
+
+        (left_ranges, right_ranges)
+    }
+
+    fn push_inline_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+        if let Some(previous) = ranges.last_mut() {
+            if previous.end == range.start {
+                previous.end = range.end;
+                return;
+            }
+        }
+        ranges.push(range);
+    }
+
+    fn set_mode(&mut self, mode: ComparisonMode, cx: &mut Context<Self>) {
+        self.mode = mode;
+        if mode == ComparisonMode::File {
+            self.left_content = self.file_left_content.clone();
+            self.right_content = self.file_right_content.clone();
+            self.recompute_diff();
+        } else if !self.text_editing {
+            self.left_content = self.left_text_input.read(cx).value().to_string();
+            self.right_content = self.right_text_input.read(cx).value().to_string();
+            self.recompute_diff();
+        }
+        self.error_message = None;
+        cx.notify();
     }
 
     fn recompute_diff(&mut self) {
@@ -91,14 +158,35 @@ impl DiffApp {
                              inserts: &mut Vec<(usize, String)>| {
             let max_len = deletes.len().max(inserts.len());
             for i in 0..max_len {
+                let (left_inline_changes, right_inline_changes) =
+                    match (deletes.get(i), inserts.get(i)) {
+                        (Some((_, left)), Some((_, right))) => {
+                            Self::inline_change_ranges(left, right)
+                        }
+                        (Some((_, left)), None) if !left.is_empty() => {
+                            (vec![0..left.len()], Vec::new())
+                        }
+                        (None, Some((_, right))) if !right.is_empty() => {
+                            (Vec::new(), vec![0..right.len()])
+                        }
+                        _ => (Vec::new(), Vec::new()),
+                    };
                 let (l_no, l_txt, l_tag) = if let Some((no, txt)) = deletes.get(i) {
-                    (Some(*no), SharedString::from(txt.clone()), Some(ChangeTag::Delete))
+                    (
+                        Some(*no),
+                        SharedString::from(txt.clone()),
+                        Some(ChangeTag::Delete),
+                    )
                 } else {
                     (None, SharedString::from(""), None)
                 };
 
                 let (r_no, r_txt, r_tag) = if let Some((no, txt)) = inserts.get(i) {
-                    (Some(*no), SharedString::from(txt.clone()), Some(ChangeTag::Insert))
+                    (
+                        Some(*no),
+                        SharedString::from(txt.clone()),
+                        Some(ChangeTag::Insert),
+                    )
                 } else {
                     (None, SharedString::from(""), None)
                 };
@@ -107,9 +195,11 @@ impl DiffApp {
                     left_line_no: l_no,
                     left_text: l_txt,
                     left_tag: l_tag,
+                    left_inline_changes,
                     right_line_no: r_no,
                     right_text: r_txt,
                     right_tag: r_tag,
+                    right_inline_changes,
                 });
             }
             deletes.clear();
@@ -117,7 +207,10 @@ impl DiffApp {
         };
 
         for change in diff.iter_all_changes() {
-            let text = change.value().trim_end_matches(&['\r', '\n'][..]).to_string();
+            let text = change
+                .value()
+                .trim_end_matches(&['\r', '\n'][..])
+                .to_string();
             match change.tag() {
                 ChangeTag::Equal => {
                     flush_pending(&mut rows, &mut pending_deletes, &mut pending_inserts);
@@ -125,9 +218,11 @@ impl DiffApp {
                         left_line_no: Some(left_no),
                         left_text: SharedString::from(text.clone()),
                         left_tag: Some(ChangeTag::Equal),
+                        left_inline_changes: Vec::new(),
                         right_line_no: Some(right_no),
                         right_text: SharedString::from(text),
                         right_tag: Some(ChangeTag::Equal),
+                        right_inline_changes: Vec::new(),
                     });
                     left_no += 1;
                     right_no += 1;
@@ -196,10 +291,16 @@ impl DiffApp {
                         let content = String::from_utf8_lossy(&bytes).into_owned();
                         if is_left {
                             app.left_path = Some(path);
-                            app.left_content = content;
+                            app.file_left_content = content.clone();
+                            if app.mode == ComparisonMode::File {
+                                app.left_content = content;
+                            }
                         } else {
                             app.right_path = Some(path);
-                            app.right_content = content;
+                            app.file_right_content = content.clone();
+                            if app.mode == ComparisonMode::File {
+                                app.right_content = content;
+                            }
                         }
                         app.error_message = None;
                         app.recompute_diff();
@@ -219,12 +320,15 @@ impl DiffApp {
         self.right_content = self.right_text_input.read(cx).value().to_string();
         self.left_path = None;
         self.right_path = None;
+        self.file_left_content.clear();
+        self.file_right_content.clear();
         self.left_path_input
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.right_path_input
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.error_message = None;
         self.recompute_diff();
+        self.text_editing = false;
         cx.notify();
     }
 
@@ -233,6 +337,7 @@ impl DiffApp {
         self.right_path = None;
         self.left_content.clear();
         self.right_content.clear();
+        self.text_editing = true;
         self.error_message = None;
 
         self.left_path_input
@@ -252,13 +357,23 @@ impl DiffApp {
         let mut errors = Vec::new();
         if let Some(path) = &self.left_path {
             match fs::read(path) {
-                Ok(bytes) => self.left_content = String::from_utf8_lossy(&bytes).into_owned(),
+                Ok(bytes) => {
+                    self.file_left_content = String::from_utf8_lossy(&bytes).into_owned();
+                    if self.mode == ComparisonMode::File {
+                        self.left_content = self.file_left_content.clone();
+                    }
+                }
                 Err(e) => errors.push(format!("左侧: {}", e)),
             }
         }
         if let Some(path) = &self.right_path {
             match fs::read(path) {
-                Ok(bytes) => self.right_content = String::from_utf8_lossy(&bytes).into_owned(),
+                Ok(bytes) => {
+                    self.file_right_content = String::from_utf8_lossy(&bytes).into_owned();
+                    if self.mode == ComparisonMode::File {
+                        self.right_content = self.file_right_content.clone();
+                    }
+                }
                 Err(e) => errors.push(format!("右侧: {}", e)),
             }
         }
@@ -271,9 +386,28 @@ impl DiffApp {
         cx.notify();
     }
 
-    fn swap_sides(&mut self, cx: &mut Context<Self>) {
+    fn swap_sides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         std::mem::swap(&mut self.left_path, &mut self.right_path);
         std::mem::swap(&mut self.left_content, &mut self.right_content);
+        std::mem::swap(&mut self.file_left_content, &mut self.file_right_content);
+        let left_path = self
+            .left_path
+            .as_ref()
+            .map_or_else(String::new, |path| path.display().to_string());
+        let right_path = self
+            .right_path
+            .as_ref()
+            .map_or_else(String::new, |path| path.display().to_string());
+        self.left_path_input
+            .update(cx, |state, cx| state.set_value(left_path, window, cx));
+        self.right_path_input
+            .update(cx, |state, cx| state.set_value(right_path, window, cx));
+        let left_text = self.left_text_input.read(cx).value().to_string();
+        let right_text = self.right_text_input.read(cx).value().to_string();
+        self.left_text_input
+            .update(cx, |state, cx| state.set_value(right_text, window, cx));
+        self.right_text_input
+            .update(cx, |state, cx| state.set_value(left_text, window, cx));
         self.recompute_diff();
         cx.notify();
     }
@@ -281,6 +415,7 @@ impl DiffApp {
 
 impl Render for DiffApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_diff = self.mode == ComparisonMode::File || !self.text_editing;
         let left_label = self
             .left_path
             .as_ref()
@@ -328,34 +463,73 @@ impl Render for DiffApp {
                         div()
                             .flex()
                             .items_center()
-                            .gap_3()
-                            .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("文件对比"))
-                            .child(div().text_xs().text_color(rgb(0x86868b)).child("左右并排"))
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id("tab-text-comparison")
+                                    .px_3()
+                                    .py(px(6.0))
+                                    .rounded_lg()
+                                    .bg(if self.mode == ComparisonMode::Text {
+                                        rgb(0xffffff)
+                                    } else {
+                                        rgb(0xe8e8ed)
+                                    })
+                                    .hover(|s| s.bg(rgb(0xffffff)))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child("文本比较")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_mode(ComparisonMode::Text, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("tab-file-comparison")
+                                    .px_3()
+                                    .py(px(6.0))
+                                    .rounded_lg()
+                                    .bg(if self.mode == ComparisonMode::File {
+                                        rgb(0xffffff)
+                                    } else {
+                                        rgb(0xe8e8ed)
+                                    })
+                                    .hover(|s| s.bg(rgb(0xffffff)))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child("文件比较")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_mode(ComparisonMode::File, cx);
+                                    })),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
-                                div()
-                                    .id("btn-toggle-text-input")
-                                    .px_2()
-                                    .py(px(5.0))
-                                    .rounded_lg()
-                                    .bg(rgb(0xe8e8ed))
-                                    .hover(|s| s.bg(rgb(0xdedee3)))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .child(if self.show_text_inputs {
-                                        "收起文本"
-                                    } else {
-                                        "粘贴文本"
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_text_inputs = !this.show_text_inputs;
-                                        cx.notify();
-                                    })),
+                            .when(
+                                self.mode == ComparisonMode::Text && !self.text_editing,
+                                |this| {
+                                    this.child(
+                                        div()
+                                            .id("btn-edit-text")
+                                            .px_2()
+                                            .py(px(5.0))
+                                            .rounded_lg()
+                                            .bg(rgb(0xe8e8ed))
+                                            .hover(|s| s.bg(rgb(0xdedee3)))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .child("编辑文本")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.text_editing = true;
+                                                cx.notify();
+                                            })),
+                                    )
+                                },
                             )
                             .child(
                                 div()
@@ -368,25 +542,27 @@ impl Render for DiffApp {
                                     .cursor_pointer()
                                     .text_xs()
                                     .child("⇄ 交换两侧")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.swap_sides(cx);
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.swap_sides(window, cx);
                                     })),
                             )
-                            .child(
-                                div()
-                                    .id("btn-reload")
-                                    .px_2()
-                                    .py(px(5.0))
-                                    .rounded_lg()
-                                    .bg(rgb(0xe8e8ed))
-                                    .hover(|s| s.bg(rgb(0xdedee3)))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .child("↻ 重新载入")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.reload_files(cx);
-                                    })),
-                            )
+                            .when(self.mode == ComparisonMode::File, |this| {
+                                this.child(
+                                    div()
+                                        .id("btn-reload")
+                                        .px_2()
+                                        .py(px(5.0))
+                                        .rounded_lg()
+                                        .bg(rgb(0xe8e8ed))
+                                        .hover(|s| s.bg(rgb(0xdedee3)))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .child("↻ 重新载入")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.reload_files(cx);
+                                        })),
+                                )
+                            })
                             .child(
                                 div()
                                     .id("btn-clear")
@@ -402,42 +578,103 @@ impl Render for DiffApp {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.clear_all(window, cx);
                                     })),
-                            )
+                            ),
                     )
-                    .child(
+                    .when(show_diff, |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py(px(4.0))
+                                        .rounded_md()
+                                        .bg(rgb(0xe5f5e9))
+                                        .text_color(rgb(0x248a3d))
+                                        .child(format!("+ {}", self.added_count)),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py(px(4.0))
+                                        .rounded_md()
+                                        .bg(rgb(0xffe9e7))
+                                        .text_color(rgb(0xc9342f))
+                                        .child(format!("- {}", self.removed_count)),
+                                ),
+                        )
+                    }),
+            )
+            .when(
+                self.mode == ComparisonMode::Text && self.text_editing,
+                |this| {
+                    this.child(
                         div()
                             .flex()
-                            .items_center()
+                            .flex_col()
                             .gap_2()
-                            .text_xs()
+                            .px_5()
+                            .py_3()
+                            .bg(rgb(0xf0f0f2))
+                            .border_b_1()
+                            .border_color(rgb(0xdcdce0))
                             .child(
                                 div()
-                                    .px_2()
-                                    .py(px(4.0))
-                                    .rounded_md()
-                                    .bg(rgb(0xe5f5e9))
-                                    .text_color(rgb(0x248a3d))
-                                    .child(format!("+ {}", self.added_count)),
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x636366))
+                                            .child("输入或粘贴两侧文本"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("btn-compare-text")
+                                            .px_3()
+                                            .py(px(6.0))
+                                            .rounded_lg()
+                                            .bg(rgb(0x007aff))
+                                            .hover(|s| s.bg(rgb(0x0066d6)))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .text_color(rgb(0xffffff))
+                                            .child("比较")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.compare_pasted_text(window, cx);
+                                            })),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .px_2()
-                                    .py(px(4.0))
-                                    .rounded_md()
-                                    .bg(rgb(0xffe9e7))
-                                    .text_color(rgb(0xc9342f))
-                                    .child(format!("- {}", self.removed_count)),
+                                    .flex()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .child(Input::new(&self.left_text_input).h(px(112.0))),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .child(Input::new(&self.right_text_input).h(px(112.0))),
+                                    ),
                             ),
-                    ),
+                    )
+                },
             )
-            .when(self.show_text_inputs, |this| {
+            .when(self.mode == ComparisonMode::File, |this| {
                 this.child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap_2()
+                        .items_center()
+                        .gap_3()
+                        .h(px(64.0))
                         .px_5()
-                        .py_3()
                         .bg(rgb(0xf0f0f2))
                         .border_b_1()
                         .border_color(rgb(0xdcdce0))
@@ -445,16 +682,37 @@ impl Render for DiffApp {
                             div()
                                 .flex()
                                 .items_center()
-                                .justify_between()
+                                .gap_2()
+                                .w(px(560.0))
                                 .child(
                                     div()
+                                        .px_2()
+                                        .py(px(4.0))
+                                        .rounded_md()
+                                        .bg(rgb(0xe5e5ea))
                                         .text_xs()
                                         .text_color(rgb(0x636366))
-                                        .child("粘贴两侧文本，然后比较"),
+                                        .child("A"),
+                                )
+                                .child(Input::new(&self.left_path_input).w(px(370.0)).h(px(34.0)))
+                                .child(
+                                    div()
+                                        .id("btn-left")
+                                        .px_2()
+                                        .py(px(6.0))
+                                        .rounded_lg()
+                                        .bg(rgb(0xe5e5ea))
+                                        .hover(|s| s.bg(rgb(0xd8d8dd)))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .child("选择")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pick_file(true, cx);
+                                        })),
                                 )
                                 .child(
                                     div()
-                                        .id("btn-compare-text")
+                                        .id("btn-open-left-path")
                                         .px_3()
                                         .py(px(6.0))
                                         .rounded_lg()
@@ -463,309 +721,233 @@ impl Render for DiffApp {
                                         .cursor_pointer()
                                         .text_xs()
                                         .text_color(rgb(0xffffff))
-                                        .child("比较文本")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.compare_pasted_text(window, cx);
+                                        .child("打开")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.open_typed_path(true, cx);
                                         })),
+                                ),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .w(px(560.0))
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py(px(4.0))
+                                        .rounded_md()
+                                        .bg(rgb(0xe5e5ea))
+                                        .text_xs()
+                                        .text_color(rgb(0x636366))
+                                        .child("B"),
+                                )
+                                .child(Input::new(&self.right_path_input).w(px(370.0)).h(px(34.0)))
+                                .child(
+                                    div()
+                                        .id("btn-right")
+                                        .px_2()
+                                        .py(px(6.0))
+                                        .rounded_lg()
+                                        .bg(rgb(0xe5e5ea))
+                                        .hover(|s| s.bg(rgb(0xd8d8dd)))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .child("选择")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pick_file(false, cx);
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("btn-open-right-path")
+                                        .px_3()
+                                        .py(px(6.0))
+                                        .rounded_lg()
+                                        .bg(rgb(0x007aff))
+                                        .hover(|s| s.bg(rgb(0x0066d6)))
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(0xffffff))
+                                        .child("打开")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.open_typed_path(false, cx);
+                                        })),
+                                ),
+                        ),
+                )
+            })
+            .when(show_diff, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .h(px(38.0))
+                        .bg(rgb(0xffffff))
+                        .border_b_1()
+                        .border_color(rgb(0xe5e5e8))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .w_1_2()
+                                .h_full()
+                                .px_5()
+                                .border_r_1()
+                                .border_color(rgb(0xe5e5e8))
+                                .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgb(0x8e8e93)))
+                                .child(div().text_xs().text_color(rgb(0x636366)).child("原始内容"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x1d1d1f))
+                                        .max_w(px(420.0))
+                                        .truncate()
+                                        .child(left_label),
                                 ),
                         )
                         .child(
                             div()
                                 .flex()
-                                .gap_3()
+                                .items_center()
+                                .gap_2()
+                                .w_1_2()
+                                .h_full()
+                                .px_5()
+                                .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgb(0x007aff)))
+                                .child(div().text_xs().text_color(rgb(0x636366)).child("修改后"))
                                 .child(
                                     div()
-                                        .flex_1()
-                                        .child(Input::new(&self.left_text_input).h(px(112.0))),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .child(Input::new(&self.right_text_input).h(px(112.0))),
+                                        .text_xs()
+                                        .text_color(rgb(0x1d1d1f))
+                                        .max_w(px(420.0))
+                                        .truncate()
+                                        .child(right_label),
                                 ),
                         ),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .h(px(64.0))
-                    .px_5()
-                    .bg(rgb(0xf0f0f2))
-                    .border_b_1()
-                    .border_color(rgb(0xdcdce0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .w(px(560.0))
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py(px(4.0))
-                                    .rounded_md()
-                                    .bg(rgb(0xe5e5ea))
-                                    .text_xs()
-                                    .text_color(rgb(0x636366))
-                                    .child("A"),
-                            )
-                            .child(
-                                Input::new(&self.left_path_input)
-                                    .w(px(370.0))
-                                    .h(px(34.0)),
-                            )
-                            .child(
-                                div()
-                                    .id("btn-left")
-                                    .px_2()
-                                    .py(px(6.0))
-                                    .rounded_lg()
-                                    .bg(rgb(0xe5e5ea))
-                                    .hover(|s| s.bg(rgb(0xd8d8dd)))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .child("选择")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.pick_file(true, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("btn-open-left-path")
-                                    .px_3()
-                                    .py(px(6.0))
-                                    .rounded_lg()
-                                    .bg(rgb(0x007aff))
-                                    .hover(|s| s.bg(rgb(0x0066d6)))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .text_color(rgb(0xffffff))
-                                    .child("打开")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.open_typed_path(true, cx);
-                                    })),
-                            ),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .w(px(560.0))
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py(px(4.0))
-                                    .rounded_md()
-                                    .bg(rgb(0xe5e5ea))
-                                    .text_xs()
-                                    .text_color(rgb(0x636366))
-                                    .child("B"),
-                            )
-                            .child(
-                                Input::new(&self.right_path_input)
-                                    .w(px(370.0))
-                                    .h(px(34.0)),
-                            )
-                            .child(
-                                div()
-                                    .id("btn-right")
-                                    .px_2()
-                                    .py(px(6.0))
-                                    .rounded_lg()
-                                    .bg(rgb(0xe5e5ea))
-                                    .hover(|s| s.bg(rgb(0xd8d8dd)))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .child("选择")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.pick_file(false, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("btn-open-right-path")
-                                    .px_3()
-                                    .py(px(6.0))
-                                    .rounded_lg()
-                                    .bg(rgb(0x007aff))
-                                    .hover(|s| s.bg(rgb(0x0066d6)))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .text_color(rgb(0xffffff))
-                                    .child("打开")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.open_typed_path(false, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(38.0))
-                    .bg(rgb(0xffffff))
-                    .border_b_1()
-                    .border_color(rgb(0xe5e5e8))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .w_1_2()
-                            .h_full()
-                            .px_5()
-                            .border_r_1()
-                            .border_color(rgb(0xe5e5e8))
-                            .child(
-                                div()
-                                    .w(px(7.0))
-                                    .h(px(7.0))
-                                    .rounded_full()
-                                    .bg(rgb(0x8e8e93)),
-                            )
-                            .child(div().text_xs().text_color(rgb(0x636366)).child("原始文件"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x1d1d1f))
-                                    .max_w(px(420.0))
-                                    .truncate()
-                                    .child(left_label),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .w_1_2()
-                            .h_full()
-                            .px_5()
-                            .child(
-                                div()
-                                    .w(px(7.0))
-                                    .h(px(7.0))
-                                    .rounded_full()
-                                    .bg(rgb(0x007aff)),
-                            )
-                            .child(div().text_xs().text_color(rgb(0x636366)).child("修改后"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x1d1d1f))
-                                    .max_w(px(420.0))
-                                    .truncate()
-                                    .child(right_label),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id("diff-scroll-area")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handle)
-                    .bg(rgb(0xffffff))
-                    .children(self.rows.iter().enumerate().map(|(idx, row)| {
-                        let left_bg = match row.left_tag {
-                            Some(ChangeTag::Delete) => rgba(0xff3b3018),
-                            None => rgba(0x8e8e9308),
-                            _ => rgba(0x00000000),
-                        };
-                        let right_bg = match row.right_tag {
-                            Some(ChangeTag::Insert) => rgba(0x34c75918),
-                            None => rgba(0x8e8e9308),
-                            _ => rgba(0x00000000),
-                        };
+            .when(show_diff, |this| {
+                this.child(
+                    div()
+                        .id("diff-scroll-area")
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll_handle)
+                        .bg(rgb(0xffffff))
+                        .children(self.rows.iter().enumerate().map(|(idx, row)| {
+                            let left_bg = match row.left_tag {
+                                Some(ChangeTag::Delete) => rgba(0xff3b3018),
+                                None => rgba(0x8e8e9308),
+                                _ => rgba(0x00000000),
+                            };
+                            let right_bg = match row.right_tag {
+                                Some(ChangeTag::Insert) => rgba(0x34c75918),
+                                None => rgba(0x8e8e9308),
+                                _ => rgba(0x00000000),
+                            };
 
-                        let left_prefix = match row.left_tag {
-                            Some(ChangeTag::Delete) => "-",
-                            _ => " ",
-                        };
-                        let right_prefix = match row.right_tag {
-                            Some(ChangeTag::Insert) => "+",
-                            _ => " ",
-                        };
+                            let left_prefix = match row.left_tag {
+                                Some(ChangeTag::Delete) => "-",
+                                _ => " ",
+                            };
+                            let right_prefix = match row.right_tag {
+                                Some(ChangeTag::Insert) => "+",
+                                _ => " ",
+                            };
+                            let left_highlight = HighlightStyle {
+                                background_color: Some(hsla(0.01, 0.8, 0.84, 1.0)),
+                                ..Default::default()
+                            };
+                            let right_highlight = HighlightStyle {
+                                background_color: Some(hsla(0.37, 0.65, 0.82, 1.0)),
+                                ..Default::default()
+                            };
+                            let left_text = StyledText::new(row.left_text.clone()).with_highlights(
+                                row.left_inline_changes
+                                    .iter()
+                                    .cloned()
+                                    .map(|range| (range, left_highlight)),
+                            );
+                            let right_text = StyledText::new(row.right_text.clone())
+                                .with_highlights(
+                                    row.right_inline_changes
+                                        .iter()
+                                        .cloned()
+                                        .map(|range| (range, right_highlight)),
+                                );
 
-                        div()
-                            .id(idx)
-                            .flex()
-                            .w_full()
-                            .min_h(px(22.0))
-                            .text_xs()
-                            .child(
-                                div()
-                                    .flex()
-                                    .w_1_2()
-                                    .bg(left_bg)
-                                    .border_r_1()
-                                    .border_color(rgb(0xe5e5e8))
-                                    .px_2()
-                                    .py(px(2.0))
-                                    .child(
-                                        div()
-                                            .w(px(40.0))
-                                            .text_color(rgb(0x8e8e93))
-                                            .child(
+                            div()
+                                .id(idx)
+                                .flex()
+                                .w_full()
+                                .min_h(px(22.0))
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .w_1_2()
+                                        .bg(left_bg)
+                                        .border_r_1()
+                                        .border_color(rgb(0xe5e5e8))
+                                        .px_2()
+                                        .py(px(2.0))
+                                        .child(
+                                            div().w(px(40.0)).text_color(rgb(0x8e8e93)).child(
                                                 row.left_line_no
                                                     .map(|n| n.to_string())
                                                     .unwrap_or_default(),
                                             ),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(16.0))
-                                            .text_color(rgb(0xc9342f))
-                                            .child(left_prefix),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .overflow_x_hidden()
-                                            .font_family("SF Mono")
-                                            .child(row.left_text.clone()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .w_1_2()
-                                    .bg(right_bg)
-                                    .px_2()
-                                    .py(px(2.0))
-                                    .child(
-                                        div()
-                                            .w(px(40.0))
-                                            .text_color(rgb(0x8e8e93))
-                                            .child(
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(16.0))
+                                                .text_color(rgb(0xc9342f))
+                                                .child(left_prefix),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .overflow_x_hidden()
+                                                .font_family("SF Mono")
+                                                .child(left_text),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .w_1_2()
+                                        .bg(right_bg)
+                                        .px_2()
+                                        .py(px(2.0))
+                                        .child(
+                                            div().w(px(40.0)).text_color(rgb(0x8e8e93)).child(
                                                 row.right_line_no
                                                     .map(|n| n.to_string())
                                                     .unwrap_or_default(),
                                             ),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(16.0))
-                                            .text_color(rgb(0x248a3d))
-                                            .child(right_prefix),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .overflow_x_hidden()
-                                            .font_family("SF Mono")
-                                            .child(row.right_text.clone()),
-                                    ),
-                            )
-                    })),
-            )
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(16.0))
+                                                .text_color(rgb(0x248a3d))
+                                                .child(right_prefix),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .overflow_x_hidden()
+                                                .font_family("SF Mono")
+                                                .child(right_text),
+                                        ),
+                                )
+                        })),
+                )
+            })
             .when(self.error_message.is_some(), |this| {
                 this.child(
                     div()
@@ -798,4 +980,25 @@ fn main() {
         )
         .unwrap();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiffApp;
+
+    #[test]
+    fn inline_diff_highlights_only_changed_text() {
+        let (left, right) = DiffApp::inline_change_ranges("version = 1;", "version = 2;");
+
+        assert_eq!(left, vec![10..11]);
+        assert_eq!(right, vec![10..11]);
+    }
+
+    #[test]
+    fn inline_diff_ranges_respect_utf8_boundaries() {
+        let (left, right) = DiffApp::inline_change_ranges("猫🙂", "狗🙂");
+
+        assert_eq!(left, vec![0..3]);
+        assert_eq!(right, vec![0..3]);
+    }
 }
