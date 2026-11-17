@@ -9,7 +9,7 @@ on:
 jobs:
   build-dmg:
     # macos-14 是 Apple Silicon (M1) runner，可原生产出 arm64 二进制
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
